@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 )
 
@@ -14,14 +16,22 @@ func TestCrawlPage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(handler))
 	defer server.Close()
 
-	pages := make(map[string]int)
-	crawlPage(server.URL, server.URL, pages)
+	baseURL, _ := url.Parse(server.URL)
+	cfg := &config{
+		pages:              make(map[string]int),
+		baseURL:            baseURL,
+		mu:                 &sync.Mutex{},
+		concurrencyControl: make(chan struct{}, 10),
+		wg:                 &sync.WaitGroup{},
+		maxPages:           100,
+	}
+	cfg.crawlPage(server.URL)
 
-	if len(pages) != 1 {
-		t.Fatalf("expected 1 page, got %d", len(pages))
+	if len(cfg.pages) != 1 {
+		t.Fatalf("expected 1 page, got %d", len(cfg.pages))
 	}
 
-	if count, exists := pages[server.URL]; !exists || count != 1 {
+	if count, exists := cfg.pages[server.URL]; !exists || count != 1 {
 		t.Errorf("expected page %s to be visited once, got %d", server.URL, count)
 	}
 }
@@ -33,10 +43,18 @@ func TestCrawlPageNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(handler))
 	defer server.Close()
 
-	pages := make(map[string]int)
-	crawlPage(server.URL, server.URL, pages)
+	baseURL, _ := url.Parse(server.URL)
+	cfg := &config{
+		pages:              make(map[string]int),
+		baseURL:            baseURL,
+		mu:                 &sync.Mutex{},
+		concurrencyControl: make(chan struct{}, 10),
+		wg:                 &sync.WaitGroup{},
+		maxPages:           100,
+	}
+	cfg.crawlPage(server.URL)
 
-	if len(pages) != 0 {
-		t.Fatalf("expected 0 pages, got %d", len(pages))
+	if len(cfg.pages) != 0 {
+		t.Fatalf("expected 0 pages, got %d", len(cfg.pages))
 	}
 }

@@ -6,40 +6,51 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+
+	"golang.org/x/net/html"
 )
 
-func crawlPage(rawBaseURL, rawCurrentURL string, pages map[string]int) {
-	// Parse the base URL
-	baseURL, err := url.Parse(rawBaseURL)
-	if err != nil {
-		fmt.Printf("error parsing base URL: %v\n", err)
-		return
+func (cfg *config) crawlPage(rawCurrentURL string) {
+	if cfg.mu == nil {
+		cfg.mu = &sync.Mutex{}
+	}
+	if cfg.concurrencyControl == nil {
+		cfg.concurrencyControl = make(chan struct{}, 10)
+	}
+	if cfg.wg == nil {
+		cfg.wg = &sync.WaitGroup{}
 	}
 
-	// Parse the current URL
+	cfg.mu.Lock()
+	if len(cfg.pages) >= cfg.maxPages {
+		cfg.mu.Unlock()
+		return
+	}
+	cfg.mu.Unlock()
+
 	currentURL, err := url.Parse(rawCurrentURL)
 	if err != nil {
 		fmt.Printf("error parsing current URL: %v\n", err)
 		return
 	}
 
-	// Ensure the current URL is on the same domain as the base URL
-	if baseURL.Host != currentURL.Host {
+	if cfg.baseURL.Host != currentURL.Host {
 		return
 	}
 
-	// Resolve the current URL against the base URL
-	resolvedURL := baseURL.ResolveReference(currentURL).String()
-
-	// Normalize the URL
+	resolvedURL := cfg.baseURL.ResolveReference(currentURL).String()
 	normalizedURL := strings.TrimSuffix(resolvedURL, "/")
 
-	// Check if the page has already been visited
-	if _, visited := pages[normalizedURL]; visited {
+	cfg.mu.Lock()
+	if _, visited := cfg.pages[normalizedURL]; visited {
+		cfg.mu.Unlock()
 		return
 	}
+	cfg.pages[normalizedURL] = 1
+	fmt.Printf("Crawling Page: %s\n", normalizedURL)
+	cfg.mu.Unlock()
 
-	// Fetch the URL
 	resp, err := http.Get(normalizedURL)
 	if err != nil {
 		fmt.Printf("error fetching URL: %v\n", err)
@@ -47,17 +58,13 @@ func crawlPage(rawBaseURL, rawCurrentURL string, pages map[string]int) {
 	}
 	defer resp.Body.Close()
 
-	// Only proceed if the response status is 200 OK
 	if resp.StatusCode != http.StatusOK {
 		fmt.Printf("error: status code %d\n", resp.StatusCode)
+		cfg.mu.Lock()
+		delete(cfg.pages, normalizedURL)
+		cfg.mu.Unlock()
 		return
 	}
-
-	// Mark the page as visited
-	pages[normalizedURL] = 1
-
-	// Print the URL being crawled
-	fmt.Printf("Crawling URL: %s\n", normalizedURL)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -65,15 +72,43 @@ func crawlPage(rawBaseURL, rawCurrentURL string, pages map[string]int) {
 		return
 	}
 
-	// Extract links from the page and recursively crawl them
 	links := extractLinks(string(body))
+	// fmt.Printf("Found %d links on %s\n", len(links), normalizedURL)
 	for _, link := range links {
-		crawlPage(rawBaseURL, link, pages)
+		cfg.wg.Add(1)
+		go func(link string) {
+			fmt.Printf("Crawling link: %s\n", link)
+			defer cfg.wg.Done()
+			cfg.concurrencyControl <- struct{}{}
+			cfg.crawlPage(link)
+			<-cfg.concurrencyControl
+		}(link)
 	}
 }
 
 func extractLinks(body string) []string {
-	// Dummy implementation for extracting links from the page body
-	// In a real implementation, you would parse the HTML and extract href attributes from <a> tags
-	return []string{}
+	var links []string
+	doc, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		fmt.Printf("error parsing HTML: %v\n", err)
+		return links
+	}
+
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "a" {
+			for _, attr := range n.Attr {
+				if attr.Key == "href" {
+					links = append(links, attr.Val)
+					break
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(doc)
+
+	return links
 }
